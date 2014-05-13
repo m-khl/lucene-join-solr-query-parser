@@ -19,13 +19,18 @@ package org.apache.solr.search.join;
 
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Random;
 
+import org.apache.lucene.search.Query;
 import org.apache.lucene.search.join.ScoreMode;
 import org.apache.solr.SolrTestCaseJ4;
 import org.apache.solr.common.util.NamedList;
 import org.apache.solr.request.SolrQueryRequest;
+import org.apache.solr.request.SolrRequestInfo;
+import org.apache.solr.response.SolrQueryResponse;
+import org.apache.solr.search.QParser;
 import org.apache.solr.search.SolrCache;
 import org.junit.BeforeClass;
 
@@ -155,6 +160,27 @@ public class TestScoreJoinQPScore extends SolrTestCaseJ4 {
     assertEquals(2, result.totalHits);
     assertEquals(3, result.scoreDocs[0].doc);
     assertEquals(0, result.scoreDocs[1].doc);*/
+    
+  }
+
+  final static Comparator<String> lessFloat = new Comparator<String>() {
+      @Override
+      public int compare(String o1, String o2) {
+          assertTrue(Float.parseFloat(o1)<Float.parseFloat(o2));
+          return 0;
+      }
+  };
+  
+  public void testBoost() throws Exception {
+      indexDataForScorring();
+      ScoreMode score = ScoreMode.values()[random().nextInt(ScoreMode.values().length)];
+   
+      final SolrQueryRequest req = req("q","{!scorejoin from=movieId_s to=id score="+score+" b=200}title:movie", "fl","id,score", "omitHeader", "true");
+      SolrRequestInfo.setRequestInfo(new SolrRequestInfo(req, new SolrQueryResponse()));
+      final Query luceneQ = QParser.getParser(req.getParams().get("q"), null, req).getQuery().rewrite(req.getSearcher().getAtomicReader());
+      assertEquals(""+luceneQ, Float.floatToIntBits(200), Float.floatToIntBits(luceneQ.getBoost()));
+      SolrRequestInfo.clearRequestInfo();
+      req.close();
   }
 
   public void testCacheHit() throws Exception {
@@ -186,18 +212,20 @@ public class TestScoreJoinQPScore extends SolrTestCaseJ4 {
       changed |= x;
       String score = (x=r.nextBoolean()) ? not(ScoreMode.Avg).name():"Avg";
       changed |= x;
+      String boost = (x=r.nextBoolean()) ? "23":"1";
+      changed |= x;
       String q = changed?"title:first":(r.nextBoolean() ? "title:first^67":"title:night");
-      final String resp = h.query(req("q","{!scorejoin from="+from+" to="+to+" score="+score+"}"+q, "fl","id", "omitHeader", "true")
+      final String resp = h.query(req("q","{!scorejoin from="+from+" to="+to+" score="+score+" b="+boost+" }"+q, "fl","id", "omitHeader", "true")
           );
       assertInsert(cache, statPre);
       
       statPre = cache.getStatistics();
-      final String repeat = h.query(req("q","{!scorejoin from="+from+" to="+to+" score="+score.toLowerCase()+
+      final String repeat = h.query(req("q","{!scorejoin from="+from+" to="+to+" score="+score.toLowerCase()+" b="+boost+
                                                                             "}"+q, "fl","id", "omitHeader", "true")
           );
       assertHit(cache, statPre);
       
-      assertEquals("lowercase should change anything",resp, repeat);
+      assertEquals("lowercase shouldn't change anything",resp, repeat);
       
       try{
         h.query(req("q","{!scorejoin from="+from+" to="+to+" score="+score.substring(0, score.length()-1)+

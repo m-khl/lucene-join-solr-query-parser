@@ -17,50 +17,22 @@ package org.apache.solr.search.join;
  */
 
 
-import java.io.Closeable;
 import java.io.IOException;
-import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.EnumMap;
 import java.util.HashMap;
-import java.util.List;
 import java.util.Map;
-import java.util.Set;
 
-import org.apache.lucene.index.AtomicReaderContext;
-import org.apache.lucene.index.DocsEnum;
-import org.apache.lucene.index.Fields;
 import org.apache.lucene.index.IndexReader;
-import org.apache.lucene.index.MultiDocsEnum;
-import org.apache.lucene.index.Terms;
-import org.apache.lucene.index.TermsEnum;
-import org.apache.lucene.search.ComplexExplanation;
-import org.apache.lucene.search.DocIdSet;
-import org.apache.lucene.search.DocIdSetIterator;
-import org.apache.lucene.search.Explanation;
-import org.apache.lucene.search.Filter;
-import org.apache.lucene.search.IndexSearcher;
 import org.apache.lucene.search.Query;
-import org.apache.lucene.search.Scorer;
-import org.apache.lucene.search.Weight;
 import org.apache.lucene.search.join.JoinUtil;
 import org.apache.lucene.search.join.ScoreMode;
-import org.apache.lucene.search.similarities.Similarity;
-import org.apache.lucene.util.Bits;
-import org.apache.lucene.util.BytesRef;
-import org.apache.lucene.util.FixedBitSet;
-import org.apache.lucene.util.StringHelper;
 import org.apache.solr.common.SolrException;
 import org.apache.solr.common.params.SolrParams;
 import org.apache.solr.common.util.NamedList;
-import org.apache.solr.common.util.SimpleOrderedMap;
 import org.apache.solr.core.CoreContainer;
 import org.apache.solr.core.SolrCore;
-import org.apache.solr.handler.component.ResponseBuilder;
 import org.apache.solr.request.LocalSolrQueryRequest;
 import org.apache.solr.request.SolrQueryRequest;
 import org.apache.solr.request.SolrRequestInfo;
-import org.apache.solr.schema.TrieField;
 import org.apache.solr.search.QParser;
 import org.apache.solr.search.QParserPlugin;
 import org.apache.solr.search.SolrIndexSearcher;
@@ -103,7 +75,7 @@ public class ScoreJoinQParserPlugin extends QParserPlugin {
           fromCore.close();
           fromHolder.decref();
         }
-      
+        joinQuery.setBoost(getBoost());
       return joinQuery.rewrite(reader);
     }
     
@@ -134,8 +106,8 @@ public class ScoreJoinQParserPlugin extends QParserPlugin {
     @Override
     public String toString() {
       return "OtherCoreJoinQuery [fromIndex=" + fromIndex
-          + ", fromCoreOpenTime=" + fromCoreOpenTime + ", toString()="
-          + super.toString() + "]"; // TODO inline
+          + ", fromCoreOpenTime=" + fromCoreOpenTime + " extends "
+          + super.toString() + "]"; 
     }
   }
 
@@ -156,8 +128,10 @@ public class ScoreJoinQParserPlugin extends QParserPlugin {
     @Override
     public Query rewrite(IndexReader reader) throws IOException {
       SolrRequestInfo info = SolrRequestInfo.getRequestInfo();
-      return JoinUtil.createJoinQuery(fromField, multipleValuesPerDocument , 
-          toField, fromQuery, info.getReq().getSearcher(), scoreMode).rewrite(reader);
+      final Query jq = JoinUtil.createJoinQuery(fromField, multipleValuesPerDocument , 
+          toField, fromQuery, info.getReq().getSearcher(), scoreMode);
+      jq.setBoost(getBoost());
+    return jq.rewrite(reader);
     }
 
     
@@ -165,7 +139,7 @@ public class ScoreJoinQParserPlugin extends QParserPlugin {
     public String toString() {
       return "SameCoreJoinQuery [fromQuery=" + fromQuery + ", fromField="
           + fromField + ", toField=" + toField + ", scoreMode=" + scoreMode
-          + ", getBoost()=" + getBoost() + "]";
+          + ", boost=" + getBoost() + "]";
     }
 
 
@@ -237,12 +211,22 @@ public class ScoreJoinQParserPlugin extends QParserPlugin {
         final ScoreMode scoreMode = parseScore();
         String v = localParams.get("v");
         final Query fromQuery;
-        long fromCoreOpenTime = 0;
-
-        final Query jq;
         
-        try {
-          if (fromIndex != null && !fromIndex.equals(req.getCore().getCoreDescriptor().getName()) ) {
+        QParser fromQueryParser = subQuery(v, null);
+        fromQuery = fromQueryParser.getQuery();
+
+        final Query q = createQuery(fromField, fromQuery, fromIndex, toField, scoreMode);
+        String b = localParams.get("b");
+        if(b!=null){
+            final float boost = Float.parseFloat(b);
+            q.setBoost(boost);
+        }
+        return q;
+      }
+
+    private Query createQuery(final String fromField, final Query fromQuery,
+            String fromIndex, final String toField, final ScoreMode scoreMode) {
+        if (fromIndex != null && !fromIndex.equals(req.getCore().getCoreDescriptor().getName()) ) {
             CoreContainer container = req.getCore().getCoreDescriptor().getCoreContainer();
 
             final SolrCore fromCore = container.getCore(fromIndex);
@@ -252,17 +236,13 @@ public class ScoreJoinQParserPlugin extends QParserPlugin {
               throw new SolrException(SolrException.ErrorCode.BAD_REQUEST, "Cross-core join: no such core " + fromIndex);
             }
 
+            long fromCoreOpenTime = 0;
             LocalSolrQueryRequest otherReq = new LocalSolrQueryRequest(fromCore, params);
             try {
-              QParser parser = QParser.getParser(v, "lucene", otherReq);
-              fromQuery = parser.getQuery();
               fromHolder = fromCore.getRegisteredSearcher();
               if (fromHolder != null) {
                 fromCoreOpenTime = fromHolder.get().getOpenTime();
               }
-              jq = JoinUtil.createJoinQuery(fromField, multipleValuesPerDocument , toField, fromQuery, fromHolder.get(), scoreMode);
-              //JoinQuery jq = new JoinQuery(fromField, toField, fromIndex, fromQuery);
-              //jq.fromCoreOpenTime = fromCoreOpenTime; TODO
               return new OtherCoreJoinQuery(fromQuery,  fromField, fromIndex, fromCoreOpenTime, scoreMode, toField);
             } finally {
               otherReq.close();
@@ -270,17 +250,9 @@ public class ScoreJoinQParserPlugin extends QParserPlugin {
               if (fromHolder != null) fromHolder.decref();
             }
           } else { 
-            QParser fromQueryParser = subQuery(v, null);
-            fromQuery = fromQueryParser.getQuery();
-            
-          //JoinQuery jq = new JoinQuery(fromField, toField, fromIndex, fromQuery);
-            //jq.fromCoreOpenTime = fromCoreOpenTime; TODO
             return new SameCoreJoinQuery(fromQuery, fromField, toField, scoreMode);
           }
-        } catch (IOException e) {
-          throw new RuntimeException(e);
-        }
-      }
+    }
 
       private ScoreMode parseScore() {
         
